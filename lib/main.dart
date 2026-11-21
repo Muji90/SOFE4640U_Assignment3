@@ -1,0 +1,832 @@
+import 'package:material_ui/material_ui.dart';
+
+import 'database_helper.dart';
+import 'models.dart';
+
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const PizzaPizzaApp());
+}
+
+class PizzaPizzaApp extends StatelessWidget {
+  const PizzaPizzaApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Pizza Pizza Order Planner',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepOrange),
+        scaffoldBackgroundColor: const Color(0xFFFFFAF5),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Color(0xFFFF6A00),
+          foregroundColor: Colors.white,
+          centerTitle: true,
+        ),
+      ),
+      home: const HomeScreen(),
+    );
+  }
+}
+
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  final DatabaseHelper _db = DatabaseHelper.instance;
+
+  final TextEditingController _budgetController = TextEditingController(
+    text: '25.00',
+  );
+
+  List<FoodItem> _foods = [];
+  List<OrderPlan> _plans = [];
+
+  final Set<int> _selectedIds = {};
+
+  int _tabIndex = 0;
+  int? _editingPlanId;
+
+  String _selectedDate = DateTime.now().toIso8601String().substring(0, 10);
+
+  String? _searchedDate;
+  OrderPlan? _searchedPlan;
+
+  bool _loading = true;
+  bool _searchPerformed = false;
+  String? _loadError;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadData();
+  }
+
+  @override
+  void dispose() {
+    _budgetController.dispose();
+    super.dispose();
+  }
+
+  // Refresh the menu and saved orders from SQLite.
+  Future<void> _loadData() async {
+    try {
+      final foods = await _db.getFoodItems();
+      final plans = await _db.getAllOrderPlans();
+
+      if (!mounted) return;
+
+      setState(() {
+        _foods = foods;
+        _plans = plans;
+
+        final validIds = foods.map((e) => e.id).toSet();
+        _selectedIds.removeWhere((id) => !validIds.contains(id));
+
+        _loading = false;
+        _loadError = null;
+      });
+    } catch (error) {
+      if (!mounted) return;
+
+      setState(() {
+        _loading = false;
+        _loadError = error.toString();
+      });
+    }
+  }
+
+  void _message(String text) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  int get _selectedTotal {
+    return _foods
+        .where((item) => _selectedIds.contains(item.id))
+        .fold<int>(0, (total, item) => total + item.priceCents);
+  }
+
+  Future<bool> _confirm(String title, String message) async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Confirm'),
+          ),
+        ],
+      ),
+    );
+
+    return result ?? false;
+  }
+
+  Future<String?> _pickDate(String initialDate) async {
+    final initial = DateTime.parse(initialDate);
+
+    final date = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2100),
+    );
+
+    return date?.toIso8601String().substring(0, 10);
+  }
+
+  // Add or edit a menu item using a form dialog.
+  Future<void> _showFoodDialog([FoodItem? item]) async {
+    final nameController = TextEditingController(text: item?.name ?? '');
+
+    final categoryController = TextEditingController(
+      text: item?.category ?? 'Pizza',
+    );
+
+    final priceController = TextEditingController(
+      text: item == null ? '' : (item.priceCents / 100).toStringAsFixed(2),
+    );
+
+    String? validationError;
+
+    final values = await showDialog<Map<String, Object>>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, updateDialog) {
+            return AlertDialog(
+              title: Text(item == null ? 'Add Food Item' : 'Update Food Item'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextField(
+                      controller: nameController,
+                      decoration: const InputDecoration(labelText: 'Food name'),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: categoryController,
+                      decoration: const InputDecoration(labelText: 'Category'),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: priceController,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: const InputDecoration(
+                        labelText: 'Price',
+                        prefixText: '\$',
+                      ),
+                    ),
+                    if (validationError != null) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        validationError!,
+                        style: const TextStyle(color: Colors.red),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    final name = nameController.text.trim();
+                    final category = categoryController.text.trim();
+                    final price = parsePrice(priceController.text);
+
+                    if (name.isEmpty ||
+                        category.isEmpty ||
+                        price == null ||
+                        price <= 0) {
+                      updateDialog(() {
+                        validationError =
+                            'Enter a name, category, and '
+                            'positive price (maximum 2 decimals).';
+                      });
+                      return;
+                    }
+
+                    Navigator.pop(dialogContext, {
+                      'name': name,
+                      'category': category,
+                      'price': price,
+                    });
+                  },
+                  child: Text(item == null ? 'Add' : 'Update'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    // Dispose controllers after the dialog has finished.
+    nameController.dispose();
+    categoryController.dispose();
+    priceController.dispose();
+
+    if (values == null || !mounted) return;
+
+    try {
+      if (item == null) {
+        await _db.addFoodItem(
+          name: values['name'] as String,
+          category: values['category'] as String,
+          priceCents: values['price'] as int,
+        );
+      } else {
+        await _db.updateFoodItem(
+          id: item.id,
+          name: values['name'] as String,
+          category: values['category'] as String,
+          priceCents: values['price'] as int,
+        );
+      }
+
+      await _loadData();
+      _message(
+        item == null
+            ? 'Food item added successfully.'
+            : 'Food item updated successfully.',
+      );
+    } catch (error) {
+      _message('Could not save food item: $error');
+    }
+  }
+
+  // Delete a menu item after confirmation.
+  Future<void> _deleteFood(FoodItem item) async {
+    final confirmed = await _confirm(
+      'Delete Food Item',
+      'Delete ${item.name} from the menu?',
+    );
+
+    if (!confirmed) return;
+
+    try {
+      await _db.deleteFoodItem(item.id);
+      await _loadData();
+      _message('Food item deleted successfully.');
+    } catch (error) {
+      _message('Could not delete food item: $error');
+    }
+  }
+
+  // Add or remove food while enforcing the daily budget.
+  void _toggleFood(FoodItem item, bool selected) {
+    if (!selected) {
+      setState(() {
+        _selectedIds.remove(item.id);
+      });
+      return;
+    }
+
+    final budget = parsePrice(_budgetController.text);
+
+    if (budget == null || budget <= 0) {
+      _message('Enter a valid target cost first.');
+      return;
+    }
+
+    if (_selectedTotal + item.priceCents > budget) {
+      _message('Budget exceeded! This item cannot be selected.');
+      return;
+    }
+
+    setState(() {
+      _selectedIds.add(item.id);
+    });
+  }
+
+  void _resetPlanner() {
+    setState(() {
+      _editingPlanId = null;
+      _selectedIds.clear();
+      _selectedDate = DateTime.now().toIso8601String().substring(0, 10);
+      _budgetController.text = '25.00';
+    });
+  }
+
+  // Save a new order or update an existing one.
+  Future<void> _savePlan() async {
+    final budget = parsePrice(_budgetController.text);
+
+    if (budget == null || budget <= 0) {
+      _message('Enter a valid positive daily target cost.');
+      return;
+    }
+
+    final selectedItems = _foods
+        .where((item) => _selectedIds.contains(item.id))
+        .toList();
+
+    if (selectedItems.isEmpty) {
+      _message('Select at least one food item.');
+      return;
+    }
+
+    if (_selectedTotal > budget) {
+      _message('The selected total exceeds the target cost.');
+      return;
+    }
+
+    try {
+      final existing = await _db.getOrderPlanByDate(_selectedDate);
+
+      if (existing != null && existing.id != _editingPlanId) {
+        _message(
+          'An order already exists for this date. '
+          'Edit the existing order or choose another date.',
+        );
+        return;
+      }
+
+      await _db.saveOrderPlan(
+        id: _editingPlanId,
+        date: _selectedDate,
+        budgetCents: budget,
+        selectedItems: selectedItems,
+      );
+
+      if (!mounted) return;
+
+      _resetPlanner();
+      await _loadData();
+
+      if (!mounted) return;
+
+      setState(() {
+        _tabIndex = 2;
+      });
+
+      _message('Order plan saved successfully.');
+    } catch (error) {
+      _message('Could not save order plan: $error');
+    }
+  }
+
+  // Load an existing order into the planner for editing.
+  void _editPlan(OrderPlan plan) {
+    final availableIds = _foods.map((e) => e.id).toSet();
+
+    final savedIds = plan.items
+        .map((item) => item.foodId)
+        .whereType<int>()
+        .toSet();
+
+    setState(() {
+      _editingPlanId = plan.id;
+      _selectedDate = plan.date;
+      _budgetController.text = (plan.budgetCents / 100).toStringAsFixed(2);
+
+      _selectedIds
+        ..clear()
+        ..addAll(savedIds.intersection(availableIds));
+
+      _tabIndex = 1;
+    });
+
+    if (savedIds.difference(availableIds).isNotEmpty) {
+      _message(
+        'Some saved foods are no longer on the menu. '
+        'Choose replacement items before updating.',
+      );
+    }
+  }
+
+  // Delete an existing order plan.
+  Future<void> _deletePlan(OrderPlan plan) async {
+    final confirmed = await _confirm(
+      'Delete Order Plan',
+      'Delete the saved order for ${plan.date}?',
+    );
+
+    if (!confirmed) return;
+
+    try {
+      await _db.deleteOrderPlan(plan.id);
+
+      if (_editingPlanId == plan.id) {
+        _resetPlanner();
+      }
+
+      if (_searchedDate == plan.date) {
+        _searchedPlan = null;
+      }
+
+      await _loadData();
+      _message('Order plan deleted successfully.');
+    } catch (error) {
+      _message('Could not delete order plan: $error');
+    }
+  }
+
+  // Search the database for a selected order date.
+  Future<void> _searchByDate() async {
+    final initial =
+        _searchedDate ?? DateTime.now().toIso8601String().substring(0, 10);
+
+    final date = await _pickDate(initial);
+
+    if (date == null) return;
+
+    try {
+      final result = await _db.getOrderPlanByDate(date);
+
+      if (!mounted) return;
+
+      setState(() {
+        _searchedDate = date;
+        _searchedPlan = result;
+        _searchPerformed = true;
+      });
+    } catch (error) {
+      _message('Search failed: $error');
+    }
+  }
+
+  Widget _sectionTitle(String title) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Text(
+        title,
+        style: Theme.of(context).textTheme.titleLarge
+            ?.copyWith(fontWeight: FontWeight.bold),
+      ),
+    );
+  }
+
+  // Menu screen: display, add, edit, and delete foods.
+  Widget _menuPage() {
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        Card(
+          color: const Color(0xFFFFE1CC),
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              children: [
+                const Icon(
+                  Icons.local_pizza,
+                  color: Colors.deepOrange,
+                  size: 62,
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'PIZZA PIZZA',
+                  style: TextStyle(
+                    fontSize: 28,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFFB63C00),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'Your daily food ordering planner',
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '${_foods.length} menu items available',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ],
+            ),
+          ),
+        ),
+        _sectionTitle('Food Menu'),
+        FilledButton.icon(
+          onPressed: () => _showFoodDialog(),
+          icon: const Icon(Icons.add),
+          label: const Text('Add Food Item'),
+        ),
+        const SizedBox(height: 8),
+        for (final item in _foods)
+          Card(
+            child: ListTile(
+              leading: CircleAvatar(
+                backgroundColor: Colors.orange.shade100,
+                child: Icon(
+                  item.category == 'Drinks'
+                      ? Icons.local_drink
+                      : item.category == 'Desserts'
+                      ? Icons.cake
+                      : item.category == 'Pizza'
+                      ? Icons.local_pizza
+                      : Icons.restaurant,
+                  color: Colors.deepOrange,
+                ),
+              ),
+              title: Text(item.name),
+              subtitle: Text(
+                '${item.category} • ${formatMoney(item.priceCents)}',
+              ),
+              trailing: Wrap(
+                spacing: 0,
+                children: [
+                  IconButton(
+                    tooltip: 'Edit food',
+                    icon: const Icon(Icons.edit),
+                    onPressed: () => _showFoodDialog(item),
+                  ),
+                  IconButton(
+                    tooltip: 'Delete food',
+                    icon: const Icon(Icons.delete, color: Colors.red),
+                    onPressed: () => _deleteFood(item),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  // Planner screen: budget, date, food selection, and save.
+  Widget _plannerPage() {
+    final budget = parsePrice(_budgetController.text);
+    final remaining = (budget ?? 0) - _selectedTotal;
+    final overBudget = budget == null || _selectedTotal > budget;
+
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        _sectionTitle(
+          _editingPlanId == null ? 'Create Order Plan' : 'Update Order Plan',
+        ),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                TextField(
+                  controller: _budgetController,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  decoration: const InputDecoration(
+                    labelText: 'Target Cost Per Day',
+                    prefixText: '\$',
+                    border: OutlineInputBorder(),
+                  ),
+                  onChanged: (_) => setState(() {}),
+                ),
+                const SizedBox(height: 16),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final chosen = await _pickDate(_selectedDate);
+
+                    if (chosen != null) {
+                      setState(() {
+                        _selectedDate = chosen;
+                      });
+                    }
+                  },
+                  icon: const Icon(Icons.calendar_month),
+                  label: Text('Date: $_selectedDate'),
+                ),
+                const Divider(height: 28),
+                Text(
+                  'Selected total: ${formatMoney(_selectedTotal)}',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 18,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Remaining budget: ${formatMoney(remaining)}',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: overBudget ? Colors.red : Colors.green.shade700,
+                  ),
+                ),
+                if (overBudget)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 8),
+                    child: Text(
+                      'Enter a valid budget that covers '
+                      'your selected items.',
+                      style: TextStyle(color: Colors.red),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        _sectionTitle('Select Food Items'),
+        for (final item in _foods)
+          Card(
+            child: CheckboxListTile(
+              value: _selectedIds.contains(item.id),
+              activeColor: Colors.deepOrange,
+              secondary: const Icon(Icons.fastfood, color: Colors.deepOrange),
+              title: Text(item.name),
+              subtitle: Text(formatMoney(item.priceCents)),
+              onChanged: (checked) {
+                _toggleFood(item, checked ?? false);
+              },
+            ),
+          ),
+        const SizedBox(height: 14),
+        FilledButton.icon(
+          onPressed: _savePlan,
+          icon: const Icon(Icons.save),
+          label: Text(
+            _editingPlanId == null ? 'Save Order Plan' : 'Update Order Plan',
+          ),
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: _resetPlanner,
+          icon: const Icon(Icons.refresh),
+          label: const Text('Clear / New Plan'),
+        ),
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  // Display a complete saved plan.
+  Widget _orderCard(OrderPlan plan) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Order Date: ${plan.date}',
+              style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            Text('Target Cost: ${formatMoney(plan.budgetCents)}'),
+            Text(
+              'Order Total: ${formatMoney(plan.totalCents)}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const Divider(),
+            for (final item in plan.items)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 3),
+                child: Row(
+                  children: [
+                    Expanded(child: Text(item.name)),
+                    Text(formatMoney(item.priceCents)),
+                  ],
+                ),
+              ),
+            const Divider(),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton.icon(
+                  onPressed: () => _editPlan(plan),
+                  icon: const Icon(Icons.edit),
+                  label: const Text('Edit'),
+                ),
+                TextButton.icon(
+                  onPressed: () => _deletePlan(plan),
+                  icon: const Icon(Icons.delete, color: Colors.red),
+                  label: const Text(
+                    'Delete',
+                    style: TextStyle(color: Colors.red),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Saved orders screen with date query and descending list.
+  Widget _savedPage() {
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        _sectionTitle('Search Order by Date'),
+        FilledButton.icon(
+          onPressed: _searchByDate,
+          icon: const Icon(Icons.search),
+          label: const Text('Choose Date and Search'),
+        ),
+        const SizedBox(height: 12),
+        if (_searchPerformed) ...[
+          Text(
+            'Search date: $_searchedDate',
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          if (_searchedPlan != null)
+            _orderCard(_searchedPlan!)
+          else
+            const Card(
+              child: Padding(
+                padding: EdgeInsets.all(18),
+                child: Text('No order plan found for this date.'),
+              ),
+            ),
+        ],
+        _sectionTitle('All Saved Order Plans'),
+        const Text('Orders are displayed by date, newest first.'),
+        const SizedBox(height: 12),
+        if (_plans.isEmpty)
+          const Card(
+            child: Padding(
+              padding: EdgeInsets.all(18),
+              child: Text('No saved orders yet. Create your first plan!'),
+            ),
+          ),
+        for (final plan in _plans) _orderCard(plan),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Pizza Pizza Planner')),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _loadError != null
+          ? Center(
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Database error: $_loadError',
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 12),
+                    FilledButton(
+                      onPressed: () {
+                        setState(() {
+                          _loading = true;
+                        });
+                        _loadData();
+                      },
+                      child: const Text('Retry'),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          : IndexedStack(
+              index: _tabIndex,
+              children: [_menuPage(), _plannerPage(), _savedPage()],
+            ),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _tabIndex,
+        onDestinationSelected: (index) {
+          setState(() {
+            _tabIndex = index;
+          });
+        },
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.restaurant_menu),
+            label: 'Menu',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.shopping_cart),
+            label: 'Plan Order',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.receipt_long),
+            label: 'Saved Orders',
+          ),
+        ],
+      ),
+    );
+  }
+}
