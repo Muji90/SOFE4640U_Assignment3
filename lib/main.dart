@@ -45,13 +45,18 @@ class _HomeScreenState extends State<HomeScreen> {
     text: '25.00',
   );
 
+  // Restaurant data loaded from SQLite.
   List<FoodItem> _foods = [];
   List<OrderPlan> _plans = [];
 
+  // New: food menu searching and category filtering.
+  String _menuSearchQuery = '';
+  String _selectedMenuCategory = 'All';
+
+  // Planner selections.
   final Set<int> _selectedIds = {};
 
-  // Preserve items from an old order that are no longer on
-  // the current restaurant menu.
+  // Preserve historical items deleted from the menu.
   final List<PlanItem> _retainedUnavailableItems = [];
 
   int _tabIndex = 0;
@@ -78,7 +83,7 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
-  // Reload menu and saved orders from SQLite.
+  // Load menu items and saved orders from SQLite.
   Future<void> _loadData() async {
     try {
       final foods = await _db.getFoodItems();
@@ -92,23 +97,22 @@ class _HomeScreenState extends State<HomeScreen> {
 
         final validIds = foods.map((e) => e.id).toSet();
 
-        // Keep any now-deleted selected items as historical
-        // items when an existing plan is being edited.
+        // Preserve deleted items in orders being edited.
         if (_editingPlanId != null) {
-          final editingPlan = plans.where((plan) => plan.id == _editingPlanId);
+          final editingPlans = plans.where((plan) => plan.id == _editingPlanId);
 
-          if (editingPlan.isNotEmpty) {
-            final alreadyRetained = _retainedUnavailableItems
+          if (editingPlans.isNotEmpty) {
+            final retainedIds = _retainedUnavailableItems
                 .map((item) => item.foodId)
                 .toSet();
 
-            for (final item in editingPlan.first.items) {
+            for (final item in editingPlans.first.items) {
               final id = item.foodId;
 
               if (id != null &&
                   _selectedIds.contains(id) &&
                   !validIds.contains(id) &&
-                  !alreadyRetained.contains(id)) {
+                  !retainedIds.contains(id)) {
                 _retainedUnavailableItems.add(item);
               }
             }
@@ -117,6 +121,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
         _selectedIds.removeWhere((id) => !validIds.contains(id));
 
+        // Refresh saved date-search results.
         if (_searchPerformed && _searchedDate != null) {
           OrderPlan? found;
 
@@ -128,6 +133,13 @@ class _HomeScreenState extends State<HomeScreen> {
           }
 
           _searchedPlan = found;
+        }
+
+        // Reset the category filter if its category
+        // no longer exists in the food database.
+        if (_selectedMenuCategory != 'All' &&
+            !foods.any((item) => item.category == _selectedMenuCategory)) {
+          _selectedMenuCategory = 'All';
         }
 
         _loading = false;
@@ -152,7 +164,7 @@ class _HomeScreenState extends State<HomeScreen> {
       ..showSnackBar(SnackBar(content: Text(text)));
   }
 
-  // Calculate total including current and historical items.
+  // Calculate the selected total including historical items.
   int get _selectedTotal {
     final currentTotal = _foods
         .where((item) => _selectedIds.contains(item.id))
@@ -166,7 +178,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return currentTotal + historicalTotal;
   }
 
-  // Confirmation dialog.
+  // Ask for confirmation before deleting.
   Future<bool> _confirm(String title, String message) async {
     final result = await showDialog<bool>(
       context: context,
@@ -195,7 +207,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return result ?? false;
   }
 
-  // Select a date.
+  // Select a date using the calendar.
   Future<String?> _pickDate(String initialDate) async {
     final initial = DateTime.parse(initialDate);
 
@@ -209,8 +221,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return date?.toIso8601String().substring(0, 10);
   }
 
-  // Add or update food items without manually disposed
-  // text controllers.
+  // Add or update a food item.
   Future<void> _showFoodDialog([FoodItem? item]) async {
     String name = item?.name ?? '';
     String category = item?.category ?? 'Pizza';
@@ -341,7 +352,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // Delete a food item from the menu.
+  // Delete food from the SQLite menu.
   Future<void> _deleteFood(FoodItem item) async {
     final confirmed = await _confirm(
       'Delete Food Item',
@@ -359,7 +370,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // Select food without going over the daily budget.
+  // Select food without exceeding the budget.
   void _toggleFood(FoodItem item, bool selected) {
     if (!selected) {
       setState(() {
@@ -385,7 +396,7 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  // Start a new order.
+  // Clear the order planner.
   void _resetPlanner() {
     setState(() {
       _editingPlanId = null;
@@ -457,8 +468,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // Load saved items when editing an order.
-  // Items deleted from the current menu are preserved.
+  // Edit an existing order and preserve deleted menu items.
   void _editPlan(OrderPlan plan) {
     final availableIds = _foods.map((item) => item.id).toSet();
 
@@ -496,7 +506,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // Delete a saved order plan.
+  // Delete a saved order.
   Future<void> _deletePlan(OrderPlan plan) async {
     final confirmed = await _confirm(
       'Delete Order Plan',
@@ -515,6 +525,7 @@ class _HomeScreenState extends State<HomeScreen> {
       }
 
       await _loadData();
+
       _message('Order plan deleted successfully.');
     } catch (error) {
       _message('Could not delete order plan: $error');
@@ -545,6 +556,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  // Display a section heading.
   Widget _sectionTitle(String title) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 12),
@@ -556,11 +568,28 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // Main restaurant menu.
+  // NEW FEATURE: Search and filter menu items.
   Widget _menuPage() {
+    final categories = _foods.map((item) => item.category).toSet().toList()
+      ..sort();
+
+    // Apply both searching and category filtering.
+    final filteredFoods = _foods.where((item) {
+      final matchesSearch = item.name.toLowerCase().contains(
+        _menuSearchQuery.toLowerCase().trim(),
+      );
+
+      final matchesCategory =
+          _selectedMenuCategory == 'All' ||
+          item.category == _selectedMenuCategory;
+
+      return matchesSearch && matchesCategory;
+    }).toList();
+
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        // Restaurant heading.
         Card(
           color: const Color(0xFFFFE1CC),
           child: Padding(
@@ -595,14 +624,89 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
         ),
+
         _sectionTitle('Food Menu'),
+
+        // Add food functionality remains unchanged.
         FilledButton.icon(
           onPressed: () => _showFoodDialog(),
           icon: const Icon(Icons.add),
           label: const Text('Add Food Item'),
         ),
+
+        const SizedBox(height: 16),
+
+        // NEW: Search by food name.
+        TextField(
+          onChanged: (value) {
+            setState(() {
+              _menuSearchQuery = value;
+            });
+          },
+          decoration: const InputDecoration(
+            labelText: 'Search Food Items',
+            hintText: 'Search for pizza, drinks, sides...',
+            prefixIcon: Icon(Icons.search),
+            border: OutlineInputBorder(),
+          ),
+        ),
+
+        const SizedBox(height: 14),
+
+        // NEW: Category filtering.
+        const Text(
+          'Filter by Category',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+
         const SizedBox(height: 8),
-        for (final item in _foods)
+
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: [
+              for (final category in ['All', ...categories])
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: ChoiceChip(
+                    label: Text(category),
+                    selected: _selectedMenuCategory == category,
+                    onSelected: (_) {
+                      setState(() {
+                        _selectedMenuCategory = category;
+                      });
+                    },
+                  ),
+                ),
+            ],
+          ),
+        ),
+
+        const SizedBox(height: 12),
+
+        // NEW: Show the number of matching items.
+        Text(
+          'Showing ${filteredFoods.length} of '
+          '${_foods.length} food items',
+          style: const TextStyle(fontWeight: FontWeight.w500),
+        ),
+
+        const SizedBox(height: 8),
+
+        // Display when no results are found.
+        if (filteredFoods.isEmpty)
+          const Card(
+            child: Padding(
+              padding: EdgeInsets.all(20),
+              child: Text(
+                'No food items match your search.',
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ),
+
+        // Display the filtered menu.
+        for (final item in filteredFoods)
           Card(
             child: ListTile(
               leading: CircleAvatar(
@@ -629,12 +733,16 @@ class _HomeScreenState extends State<HomeScreen> {
                   IconButton(
                     tooltip: 'Edit food',
                     icon: const Icon(Icons.edit),
-                    onPressed: () => _showFoodDialog(item),
+                    onPressed: () {
+                      _showFoodDialog(item);
+                    },
                   ),
                   IconButton(
                     tooltip: 'Delete food',
                     icon: const Icon(Icons.delete, color: Colors.red),
-                    onPressed: () => _deleteFood(item),
+                    onPressed: () {
+                      _deleteFood(item);
+                    },
                   ),
                 ],
               ),
@@ -644,7 +752,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // Daily spending limit, date picker, and food selection.
+  // Order planner, date picker, budget, and food selection.
   Widget _plannerPage() {
     final budget = parsePrice(_budgetController.text);
     final remaining = (budget ?? 0) - _selectedTotal;
@@ -657,6 +765,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _sectionTitle(
           _editingPlanId == null ? 'Create Order Plan' : 'Update Order Plan',
         ),
+
         Card(
           child: Padding(
             padding: const EdgeInsets.all(16),
@@ -673,9 +782,13 @@ class _HomeScreenState extends State<HomeScreen> {
                     prefixText: '\$',
                     border: OutlineInputBorder(),
                   ),
-                  onChanged: (_) => setState(() {}),
+                  onChanged: (_) {
+                    setState(() {});
+                  },
                 ),
+
                 const SizedBox(height: 16),
+
                 OutlinedButton.icon(
                   onPressed: () async {
                     final chosen = await _pickDate(_selectedDate);
@@ -689,7 +802,9 @@ class _HomeScreenState extends State<HomeScreen> {
                   icon: const Icon(Icons.calendar_month),
                   label: Text('Date: $_selectedDate'),
                 ),
+
                 const Divider(height: 28),
+
                 Text(
                   'Selected total: '
                   '${formatMoney(_selectedTotal)}',
@@ -698,7 +813,9 @@ class _HomeScreenState extends State<HomeScreen> {
                     fontSize: 18,
                   ),
                 ),
+
                 const SizedBox(height: 6),
+
                 Text(
                   'Remaining budget: '
                   '${formatMoney(remaining)}',
@@ -707,6 +824,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     color: overBudget ? Colors.red : Colors.green.shade700,
                   ),
                 ),
+
                 if (overBudget)
                   const Padding(
                     padding: EdgeInsets.only(top: 8),
@@ -721,14 +839,17 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ),
 
-        // Historical items remain visible when editing.
+        // Preserve historical order items.
         if (_retainedUnavailableItems.isNotEmpty) ...[
           _sectionTitle('Previously Saved Items'),
+
           const Text(
             'These items are no longer on the menu, '
             'but their saved prices are preserved.',
           ),
+
           const SizedBox(height: 8),
+
           for (final item in _retainedUnavailableItems)
             Card(
               child: ListTile(
@@ -752,6 +873,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
 
         _sectionTitle('Select Food Items'),
+
         for (final item in _foods)
           Card(
             child: CheckboxListTile(
@@ -765,7 +887,9 @@ class _HomeScreenState extends State<HomeScreen> {
               },
             ),
           ),
+
         const SizedBox(height: 14),
+
         FilledButton.icon(
           onPressed: _savePlan,
           icon: const Icon(Icons.save),
@@ -773,18 +897,21 @@ class _HomeScreenState extends State<HomeScreen> {
             _editingPlanId == null ? 'Save Order Plan' : 'Update Order Plan',
           ),
         ),
+
         const SizedBox(height: 8),
+
         OutlinedButton.icon(
           onPressed: _resetPlanner,
           icon: const Icon(Icons.refresh),
           label: const Text('Clear / New Plan'),
         ),
+
         const SizedBox(height: 24),
       ],
     );
   }
 
-  // Show a saved order with its stored item prices.
+  // Display one saved order with food item snapshots.
   Widget _orderCard(OrderPlan plan) {
     return Card(
       child: Padding(
@@ -796,17 +923,22 @@ class _HomeScreenState extends State<HomeScreen> {
               'Order Date: ${plan.date}',
               style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
             ),
+
             const SizedBox(height: 8),
+
             Text(
               'Target Cost: '
               '${formatMoney(plan.budgetCents)}',
             ),
+
             Text(
               'Order Total: '
               '${formatMoney(plan.totalCents)}',
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
+
             const Divider(),
+
             for (final item in plan.items)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 3),
@@ -817,17 +949,23 @@ class _HomeScreenState extends State<HomeScreen> {
                   ],
                 ),
               ),
+
             const Divider(),
+
             Row(
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
                 TextButton.icon(
-                  onPressed: () => _editPlan(plan),
+                  onPressed: () {
+                    _editPlan(plan);
+                  },
                   icon: const Icon(Icons.edit),
                   label: const Text('Edit'),
                 ),
                 TextButton.icon(
-                  onPressed: () => _deletePlan(plan),
+                  onPressed: () {
+                    _deletePlan(plan);
+                  },
                   icon: const Icon(Icons.delete, color: Colors.red),
                   label: const Text(
                     'Delete',
@@ -842,24 +980,29 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // Search by date and show orders newest first.
+  // Search saved orders and display them newest first.
   Widget _savedPage() {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
         _sectionTitle('Search Order by Date'),
+
         FilledButton.icon(
           onPressed: _searchByDate,
           icon: const Icon(Icons.search),
           label: const Text('Choose Date and Search'),
         ),
+
         const SizedBox(height: 12),
+
         if (_searchPerformed) ...[
           Text(
             'Search date: $_searchedDate',
             style: const TextStyle(fontWeight: FontWeight.bold),
           ),
+
           const SizedBox(height: 8),
+
           if (_searchedPlan != null)
             _orderCard(_searchedPlan!)
           else
@@ -870,9 +1013,13 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
         ],
+
         _sectionTitle('All Saved Order Plans'),
+
         const Text('Orders are displayed by date, newest first.'),
+
         const SizedBox(height: 12),
+
         if (_plans.isEmpty)
           const Card(
             child: Padding(
@@ -883,11 +1030,13 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
           ),
+
         for (final plan in _plans) _orderCard(plan),
       ],
     );
   }
 
+  // Main application and navigation tabs.
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -923,6 +1072,7 @@ class _HomeScreenState extends State<HomeScreen> {
               index: _tabIndex,
               children: [_menuPage(), _plannerPage(), _savedPage()],
             ),
+
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tabIndex,
         onDestinationSelected: (index) {
