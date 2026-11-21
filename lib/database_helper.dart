@@ -4,27 +4,85 @@ import 'package:sqflite/sqflite.dart';
 import 'models.dart';
 
 class DatabaseHelper {
-  DatabaseHelper._();
+  // Private constructor for the database helper.
+  DatabaseHelper._(this._databaseFileName);
 
-  static final DatabaseHelper instance = DatabaseHelper._();
+  // Main application database.
+  static final DatabaseHelper instance = DatabaseHelper._(
+    'pizza_pizza_orders.db',
+  );
 
-  Database? _database;
+  // Create a separate database for automated testing.
+  factory DatabaseHelper.testing(String databaseFileName) {
+    if (!databaseFileName.endsWith('.db') ||
+        databaseFileName == 'pizza_pizza_orders.db' ||
+        databaseFileName.contains('/') ||
+        databaseFileName.contains('\\')) {
+      throw ArgumentError(
+        'Tests must use a separate database filename ending in .db.',
+      );
+    }
 
-  Future<Database> get database async {
-    if (_database != null) return _database!;
-
-    _database = await _initializeDatabase();
-    return _database!;
+    return DatabaseHelper._(databaseFileName);
   }
 
-  // Create the database and seed the menu on first installation.
+  final String _databaseFileName;
+
+  Database? _database;
+  Future<Database>? _openingDatabase;
+
+  // Return the existing database or initialize a new connection.
+  Future<Database> get database async {
+    if (_database != null && _database!.isOpen) {
+      return _database!;
+    }
+
+    if (_openingDatabase != null) {
+      return _openingDatabase!;
+    }
+
+    final opening = _initializeDatabase();
+    _openingDatabase = opening;
+
+    try {
+      final db = await opening;
+      _database = db;
+      return db;
+    } finally {
+      _openingDatabase = null;
+    }
+  }
+
+  // Close the database connection after testing.
+  Future<void> close() async {
+    if (_openingDatabase != null) {
+      await _openingDatabase;
+    }
+
+    final db = _database;
+    _database = null;
+
+    if (db != null && db.isOpen) {
+      await db.close();
+    }
+  }
+
+  // Create the database and seed its items on first installation.
   Future<Database> _initializeDatabase() async {
     final databasePath = await getDatabasesPath();
-    final path = join(databasePath, 'pizza_pizza_orders.db');
+
+    final path = join(databasePath, _databaseFileName);
 
     return openDatabase(
       path,
       version: 1,
+
+      // Enable foreign key constraints.
+      onConfigure: (db) async {
+        await db.execute('PRAGMA foreign_keys = ON');
+      },
+
+      // Create all three tables when the database is first created.
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE food_items (
@@ -51,21 +109,20 @@ class DatabaseHelper {
             plan_id INTEGER NOT NULL,
             food_id INTEGER,
             item_name TEXT NOT NULL,
-            price_cents INTEGER NOT NULL,
+            price_cents INTEGER NOT NULL
+              CHECK(price_cents > 0),
             FOREIGN KEY(plan_id)
               REFERENCES order_plans(id) ON DELETE CASCADE
           )
         ''');
 
+        // Automatically insert the initial restaurant menu.
         await _seedFoodItems(db);
-      },
-      onConfigure: (db) async {
-        await db.execute('PRAGMA foreign_keys = ON');
       },
     );
   }
 
-  // Insert 20 menu items automatically into a new database.
+  // Seed 20 Pizza Pizza food items into a new database.
   Future<void> _seedFoodItems(Database db) async {
     final seedItems = <Map<String, Object>>[
       {
@@ -107,7 +164,7 @@ class DatabaseHelper {
     await batch.commit(noResult: true);
   }
 
-  // Get all menu items, ordered by category and name.
+  // Retrieve all food items ordered by category and name.
   Future<List<FoodItem>> getFoodItems() async {
     final db = await database;
 
@@ -119,17 +176,23 @@ class DatabaseHelper {
     return rows.map(FoodItem.fromMap).toList();
   }
 
-  // Add a new food item.
+  // Add a new food item to the menu.
   Future<int> addFoodItem({
     required String name,
     required String category,
     required int priceCents,
   }) async {
+    if (name.trim().isEmpty || category.trim().isEmpty || priceCents <= 0) {
+      throw ArgumentError(
+        'A food item requires a name, category, and positive price.',
+      );
+    }
+
     final db = await database;
 
     return db.insert('food_items', {
-      'name': name,
-      'category': category,
+      'name': name.trim(),
+      'category': category.trim(),
       'price_cents': priceCents,
     });
   }
@@ -141,54 +204,83 @@ class DatabaseHelper {
     required String category,
     required int priceCents,
   }) async {
+    if (name.trim().isEmpty || category.trim().isEmpty || priceCents <= 0) {
+      throw ArgumentError(
+        'A food item requires a name, category, and positive price.',
+      );
+    }
+
     final db = await database;
 
     return db.update(
       'food_items',
-      {'name': name, 'category': category, 'price_cents': priceCents},
+      {
+        'name': name.trim(),
+        'category': category.trim(),
+        'price_cents': priceCents,
+      },
       where: 'id = ?',
       whereArgs: [id],
     );
   }
 
   // Delete a food item from the menu.
+  // Existing order plans retain their saved item snapshots.
   Future<int> deleteFoodItem(int id) async {
     final db = await database;
 
     return db.delete('food_items', where: 'id = ?', whereArgs: [id]);
   }
 
-  // Insert or update an order and its selected food items.
+  // Save or update an order plan.
+  //
+  // selectedItems contains current menu selections.
+  // retainedItems contains historical items no longer on the menu.
   Future<int> saveOrderPlan({
     int? id,
     required String date,
     required int budgetCents,
     required List<FoodItem> selectedItems,
+    List<PlanItem> retainedItems = const [],
   }) async {
-    if (selectedItems.isEmpty) {
+    if (selectedItems.isEmpty && retainedItems.isEmpty) {
       throw StateError('Select at least one food item.');
     }
 
-    final total = selectedItems.fold<int>(
+    // Calculate the total of current menu selections.
+    final selectedTotal = selectedItems.fold<int>(
       0,
       (sum, item) => sum + item.priceCents,
     );
 
+    // Include historical food prices in the order total.
+    final retainedTotal = retainedItems.fold<int>(
+      0,
+      (sum, item) => sum + item.priceCents,
+    );
+
+    final total = selectedTotal + retainedTotal;
+
+    // Ensure no order can exceed its daily spending target.
     if (budgetCents <= 0 || total > budgetCents) {
       throw StateError('The order exceeds the target cost.');
     }
 
     final db = await database;
 
+    // Transactions ensure that an order and all its items
+    // are saved together.
     return db.transaction((txn) async {
       late final int planId;
 
       if (id == null) {
+        // Create a new order plan.
         planId = await txn.insert('order_plans', {
           'order_date': date,
           'budget_cents': budgetCents,
         });
       } else {
+        // Update an existing order plan.
         final count = await txn.update(
           'order_plans',
           {'order_date': date, 'budget_cents': budgetCents},
@@ -202,6 +294,8 @@ class DatabaseHelper {
 
         planId = id;
 
+        // Remove previous selections before saving the
+        // updated selection.
         await txn.delete(
           'order_items',
           where: 'plan_id = ?',
@@ -209,6 +303,7 @@ class DatabaseHelper {
         );
       }
 
+      // Store the selected current menu items.
       for (final item in selectedItems) {
         await txn.insert('order_items', {
           'plan_id': planId,
@@ -218,11 +313,22 @@ class DatabaseHelper {
         });
       }
 
+      // Store historical items with their original names
+      // and prices.
+      for (final item in retainedItems) {
+        await txn.insert('order_items', {
+          'plan_id': planId,
+          'food_id': null,
+          'item_name': item.name,
+          'price_cents': item.priceCents,
+        });
+      }
+
       return planId;
     });
   }
 
-  // Load one complete order plan and its saved item details.
+  // Retrieve one complete saved order plan.
   Future<OrderPlan?> getOrderPlan(int id) async {
     final db = await database;
 
@@ -233,8 +339,11 @@ class DatabaseHelper {
       limit: 1,
     );
 
-    if (rows.isEmpty) return null;
+    if (rows.isEmpty) {
+      return null;
+    }
 
+    // Retrieve the items belonging to this order.
     final orderRows = await db.query(
       'order_items',
       where: 'plan_id = ?',
@@ -252,7 +361,7 @@ class DatabaseHelper {
     );
   }
 
-  // Query a saved order plan by its date.
+  // Search for a saved order plan by its date.
   Future<OrderPlan?> getOrderPlanByDate(String date) async {
     final db = await database;
 
@@ -264,12 +373,14 @@ class DatabaseHelper {
       limit: 1,
     );
 
-    if (rows.isEmpty) return null;
+    if (rows.isEmpty) {
+      return null;
+    }
 
     return getOrderPlan(rows.first['id'] as int);
   }
 
-  // Retrieve all plans in descending date order.
+  // Retrieve saved order plans in descending date order.
   Future<List<OrderPlan>> getAllOrderPlans() async {
     final db = await database;
 
@@ -292,7 +403,8 @@ class DatabaseHelper {
     return plans;
   }
 
-  // Delete a saved order and its associated items.
+  // Delete an order plan and its associated items.
+  // Foreign key cascading removes the related order_items.
   Future<int> deleteOrderPlan(int id) async {
     final db = await database;
 
