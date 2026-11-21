@@ -74,7 +74,7 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
-  // Refresh the menu and saved orders from SQLite.
+  // Load food items and saved order plans from SQLite.
   Future<void> _loadData() async {
     try {
       final foods = await _db.getFoodItems();
@@ -87,7 +87,22 @@ class _HomeScreenState extends State<HomeScreen> {
         _plans = plans;
 
         final validIds = foods.map((e) => e.id).toSet();
+
         _selectedIds.removeWhere((id) => !validIds.contains(id));
+
+        // Refresh search results when the database changes.
+        if (_searchPerformed && _searchedDate != null) {
+          for (final plan in plans) {
+            if (plan.date == _searchedDate) {
+              _searchedPlan = plan;
+              break;
+            }
+          }
+
+          if (!plans.any((p) => p.date == _searchedDate)) {
+            _searchedPlan = null;
+          }
+        }
 
         _loading = false;
         _loadError = null;
@@ -102,6 +117,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  // Display application messages.
   void _message(String text) {
     if (!mounted) return;
 
@@ -110,34 +126,43 @@ class _HomeScreenState extends State<HomeScreen> {
       ..showSnackBar(SnackBar(content: Text(text)));
   }
 
+  // Calculate total cost of selected food items.
   int get _selectedTotal {
     return _foods
         .where((item) => _selectedIds.contains(item.id))
         .fold<int>(0, (total, item) => total + item.priceCents);
   }
 
+  // Ask the user to confirm an action.
   Future<bool> _confirm(String title, String message) async {
     final result = await showDialog<bool>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text(title),
-        content: Text(message),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Confirm'),
-          ),
-        ],
-      ),
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: Text(title),
+          content: Text(message),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(dialogContext, false);
+              },
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                Navigator.pop(dialogContext, true);
+              },
+              child: const Text('Confirm'),
+            ),
+          ],
+        );
+      },
     );
 
     return result ?? false;
   }
 
+  // Open a date picker.
   Future<String?> _pickDate(String initialDate) async {
     final initial = DateTime.parse(initialDate);
 
@@ -151,17 +176,15 @@ class _HomeScreenState extends State<HomeScreen> {
     return date?.toIso8601String().substring(0, 10);
   }
 
-  // Add or edit a menu item using a form dialog.
+  // Add or update a food item.
+  // Uses form fields without manually managed controllers.
   Future<void> _showFoodDialog([FoodItem? item]) async {
-    final nameController = TextEditingController(text: item?.name ?? '');
+    String name = item?.name ?? '';
+    String category = item?.category ?? 'Pizza';
 
-    final categoryController = TextEditingController(
-      text: item?.category ?? 'Pizza',
-    );
-
-    final priceController = TextEditingController(
-      text: item == null ? '' : (item.priceCents / 100).toStringAsFixed(2),
-    );
+    String priceText = item == null
+        ? ''
+        : (item.priceCents / 100).toStringAsFixed(2);
 
     String? validationError;
 
@@ -176,18 +199,24 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    TextField(
-                      controller: nameController,
+                    TextFormField(
+                      initialValue: name,
                       decoration: const InputDecoration(labelText: 'Food name'),
+                      onChanged: (value) {
+                        name = value;
+                      },
                     ),
                     const SizedBox(height: 12),
-                    TextField(
-                      controller: categoryController,
+                    TextFormField(
+                      initialValue: category,
                       decoration: const InputDecoration(labelText: 'Category'),
+                      onChanged: (value) {
+                        category = value;
+                      },
                     ),
                     const SizedBox(height: 12),
-                    TextField(
-                      controller: priceController,
+                    TextFormField(
+                      initialValue: priceText,
                       keyboardType: const TextInputType.numberWithOptions(
                         decimal: true,
                       ),
@@ -195,6 +224,9 @@ class _HomeScreenState extends State<HomeScreen> {
                         labelText: 'Price',
                         prefixText: '\$',
                       ),
+                      onChanged: (value) {
+                        priceText = value;
+                      },
                     ),
                     if (validationError != null) ...[
                       const SizedBox(height: 12),
@@ -208,17 +240,19 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               actions: [
                 TextButton(
-                  onPressed: () => Navigator.pop(dialogContext),
+                  onPressed: () {
+                    Navigator.pop(dialogContext);
+                  },
                   child: const Text('Cancel'),
                 ),
                 FilledButton(
                   onPressed: () {
-                    final name = nameController.text.trim();
-                    final category = categoryController.text.trim();
-                    final price = parsePrice(priceController.text);
+                    final trimmedName = name.trim();
+                    final trimmedCategory = category.trim();
+                    final price = parsePrice(priceText);
 
-                    if (name.isEmpty ||
-                        category.isEmpty ||
+                    if (trimmedName.isEmpty ||
+                        trimmedCategory.isEmpty ||
                         price == null ||
                         price <= 0) {
                       updateDialog(() {
@@ -230,8 +264,8 @@ class _HomeScreenState extends State<HomeScreen> {
                     }
 
                     Navigator.pop(dialogContext, {
-                      'name': name,
-                      'category': category,
+                      'name': trimmedName,
+                      'category': trimmedCategory,
                       'price': price,
                     });
                   },
@@ -243,11 +277,6 @@ class _HomeScreenState extends State<HomeScreen> {
         );
       },
     );
-
-    // Dispose controllers after the dialog has finished.
-    nameController.dispose();
-    categoryController.dispose();
-    priceController.dispose();
 
     if (values == null || !mounted) return;
 
@@ -268,6 +297,7 @@ class _HomeScreenState extends State<HomeScreen> {
       }
 
       await _loadData();
+
       _message(
         item == null
             ? 'Food item added successfully.'
@@ -278,7 +308,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // Delete a menu item after confirmation.
+  // Delete a food item from SQLite.
   Future<void> _deleteFood(FoodItem item) async {
     final confirmed = await _confirm(
       'Delete Food Item',
@@ -289,14 +319,16 @@ class _HomeScreenState extends State<HomeScreen> {
 
     try {
       await _db.deleteFoodItem(item.id);
+
       await _loadData();
+
       _message('Food item deleted successfully.');
     } catch (error) {
       _message('Could not delete food item: $error');
     }
   }
 
-  // Add or remove food while enforcing the daily budget.
+  // Select or deselect food while enforcing the budget.
   void _toggleFood(FoodItem item, bool selected) {
     if (!selected) {
       setState(() {
@@ -322,16 +354,19 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  // Reset the order planner.
   void _resetPlanner() {
     setState(() {
       _editingPlanId = null;
       _selectedIds.clear();
+
       _selectedDate = DateTime.now().toIso8601String().substring(0, 10);
+
       _budgetController.text = '25.00';
     });
   }
 
-  // Save a new order or update an existing one.
+  // Save a new order or update an existing plan.
   Future<void> _savePlan() async {
     final budget = parsePrice(_budgetController.text);
 
@@ -375,6 +410,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (!mounted) return;
 
       _resetPlanner();
+
       await _loadData();
 
       if (!mounted) return;
@@ -389,9 +425,9 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // Load an existing order into the planner for editing.
+  // Load a saved order for editing.
   void _editPlan(OrderPlan plan) {
-    final availableIds = _foods.map((e) => e.id).toSet();
+    final availableIds = _foods.map((item) => item.id).toSet();
 
     final savedIds = plan.items
         .map((item) => item.foodId)
@@ -401,6 +437,7 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _editingPlanId = plan.id;
       _selectedDate = plan.date;
+
       _budgetController.text = (plan.budgetCents / 100).toStringAsFixed(2);
 
       _selectedIds
@@ -418,7 +455,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // Delete an existing order plan.
+  // Delete a saved order plan.
   Future<void> _deletePlan(OrderPlan plan) async {
     final confirmed = await _confirm(
       'Delete Order Plan',
@@ -430,22 +467,21 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       await _db.deleteOrderPlan(plan.id);
 
+      if (!mounted) return;
+
       if (_editingPlanId == plan.id) {
         _resetPlanner();
       }
 
-      if (_searchedDate == plan.date) {
-        _searchedPlan = null;
-      }
-
       await _loadData();
+
       _message('Order plan deleted successfully.');
     } catch (error) {
       _message('Could not delete order plan: $error');
     }
   }
 
-  // Search the database for a selected order date.
+  // Search the database for a plan by date.
   Future<void> _searchByDate() async {
     final initial =
         _searchedDate ?? DateTime.now().toIso8601String().substring(0, 10);
@@ -469,6 +505,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  // Display section headings.
   Widget _sectionTitle(String title) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 12),
@@ -480,7 +517,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // Menu screen: display, add, edit, and delete foods.
+  // Main food menu screen.
   Widget _menuPage() {
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -519,13 +556,19 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
         ),
+
         _sectionTitle('Food Menu'),
+
         FilledButton.icon(
-          onPressed: () => _showFoodDialog(),
+          onPressed: () {
+            _showFoodDialog();
+          },
           icon: const Icon(Icons.add),
           label: const Text('Add Food Item'),
         ),
+
         const SizedBox(height: 8),
+
         for (final item in _foods)
           Card(
             child: ListTile(
@@ -544,7 +587,8 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               title: Text(item.name),
               subtitle: Text(
-                '${item.category} • ${formatMoney(item.priceCents)}',
+                '${item.category} • '
+                '${formatMoney(item.priceCents)}',
               ),
               trailing: Wrap(
                 spacing: 0,
@@ -552,12 +596,16 @@ class _HomeScreenState extends State<HomeScreen> {
                   IconButton(
                     tooltip: 'Edit food',
                     icon: const Icon(Icons.edit),
-                    onPressed: () => _showFoodDialog(item),
+                    onPressed: () {
+                      _showFoodDialog(item);
+                    },
                   ),
                   IconButton(
                     tooltip: 'Delete food',
                     icon: const Icon(Icons.delete, color: Colors.red),
-                    onPressed: () => _deleteFood(item),
+                    onPressed: () {
+                      _deleteFood(item);
+                    },
                   ),
                 ],
               ),
@@ -567,11 +615,12 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // Planner screen: budget, date, food selection, and save.
+  // Daily budget and food selection screen.
   Widget _plannerPage() {
     final budget = parsePrice(_budgetController.text);
     final remaining = (budget ?? 0) - _selectedTotal;
-    final overBudget = budget == null || _selectedTotal > budget;
+
+    final overBudget = budget == null || budget <= 0 || _selectedTotal > budget;
 
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -579,6 +628,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _sectionTitle(
           _editingPlanId == null ? 'Create Order Plan' : 'Update Order Plan',
         ),
+
         Card(
           child: Padding(
             padding: const EdgeInsets.all(16),
@@ -595,14 +645,18 @@ class _HomeScreenState extends State<HomeScreen> {
                     prefixText: '\$',
                     border: OutlineInputBorder(),
                   ),
-                  onChanged: (_) => setState(() {}),
+                  onChanged: (_) {
+                    setState(() {});
+                  },
                 ),
+
                 const SizedBox(height: 16),
+
                 OutlinedButton.icon(
                   onPressed: () async {
                     final chosen = await _pickDate(_selectedDate);
 
-                    if (chosen != null) {
+                    if (chosen != null && mounted) {
                       setState(() {
                         _selectedDate = chosen;
                       });
@@ -611,22 +665,29 @@ class _HomeScreenState extends State<HomeScreen> {
                   icon: const Icon(Icons.calendar_month),
                   label: Text('Date: $_selectedDate'),
                 ),
+
                 const Divider(height: 28),
+
                 Text(
-                  'Selected total: ${formatMoney(_selectedTotal)}',
+                  'Selected total: '
+                  '${formatMoney(_selectedTotal)}',
                   style: const TextStyle(
                     fontWeight: FontWeight.bold,
                     fontSize: 18,
                   ),
                 ),
+
                 const SizedBox(height: 6),
+
                 Text(
-                  'Remaining budget: ${formatMoney(remaining)}',
+                  'Remaining budget: '
+                  '${formatMoney(remaining)}',
                   style: TextStyle(
                     fontWeight: FontWeight.bold,
                     color: overBudget ? Colors.red : Colors.green.shade700,
                   ),
                 ),
+
                 if (overBudget)
                   const Padding(
                     padding: EdgeInsets.only(top: 8),
@@ -640,7 +701,9 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
         ),
+
         _sectionTitle('Select Food Items'),
+
         for (final item in _foods)
           Card(
             child: CheckboxListTile(
@@ -654,7 +717,9 @@ class _HomeScreenState extends State<HomeScreen> {
               },
             ),
           ),
+
         const SizedBox(height: 14),
+
         FilledButton.icon(
           onPressed: _savePlan,
           icon: const Icon(Icons.save),
@@ -662,18 +727,21 @@ class _HomeScreenState extends State<HomeScreen> {
             _editingPlanId == null ? 'Save Order Plan' : 'Update Order Plan',
           ),
         ),
+
         const SizedBox(height: 8),
+
         OutlinedButton.icon(
           onPressed: _resetPlanner,
           icon: const Icon(Icons.refresh),
           label: const Text('Clear / New Plan'),
         ),
+
         const SizedBox(height: 24),
       ],
     );
   }
 
-  // Display a complete saved plan.
+  // Display one saved order plan.
   Widget _orderCard(OrderPlan plan) {
     return Card(
       child: Padding(
@@ -685,13 +753,22 @@ class _HomeScreenState extends State<HomeScreen> {
               'Order Date: ${plan.date}',
               style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
             ),
+
             const SizedBox(height: 8),
-            Text('Target Cost: ${formatMoney(plan.budgetCents)}'),
+
             Text(
-              'Order Total: ${formatMoney(plan.totalCents)}',
+              'Target Cost: '
+              '${formatMoney(plan.budgetCents)}',
+            ),
+
+            Text(
+              'Order Total: '
+              '${formatMoney(plan.totalCents)}',
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
+
             const Divider(),
+
             for (final item in plan.items)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 3),
@@ -702,17 +779,24 @@ class _HomeScreenState extends State<HomeScreen> {
                   ],
                 ),
               ),
+
             const Divider(),
+
             Row(
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
                 TextButton.icon(
-                  onPressed: () => _editPlan(plan),
+                  onPressed: () {
+                    _editPlan(plan);
+                  },
                   icon: const Icon(Icons.edit),
                   label: const Text('Edit'),
                 ),
+
                 TextButton.icon(
-                  onPressed: () => _deletePlan(plan),
+                  onPressed: () {
+                    _deletePlan(plan);
+                  },
                   icon: const Icon(Icons.delete, color: Colors.red),
                   label: const Text(
                     'Delete',
@@ -727,24 +811,29 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // Saved orders screen with date query and descending list.
+  // Search and display saved orders.
   Widget _savedPage() {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
         _sectionTitle('Search Order by Date'),
+
         FilledButton.icon(
           onPressed: _searchByDate,
           icon: const Icon(Icons.search),
           label: const Text('Choose Date and Search'),
         ),
+
         const SizedBox(height: 12),
+
         if (_searchPerformed) ...[
           Text(
             'Search date: $_searchedDate',
             style: const TextStyle(fontWeight: FontWeight.bold),
           ),
+
           const SizedBox(height: 8),
+
           if (_searchedPlan != null)
             _orderCard(_searchedPlan!)
           else
@@ -755,25 +844,35 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
         ],
+
         _sectionTitle('All Saved Order Plans'),
+
         const Text('Orders are displayed by date, newest first.'),
+
         const SizedBox(height: 12),
+
         if (_plans.isEmpty)
           const Card(
             child: Padding(
               padding: EdgeInsets.all(18),
-              child: Text('No saved orders yet. Create your first plan!'),
+              child: Text(
+                'No saved orders yet. '
+                'Create your first plan!',
+              ),
             ),
           ),
+
         for (final plan in _plans) _orderCard(plan),
       ],
     );
   }
 
+  // Main application interface and navigation.
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Pizza Pizza Planner')),
+
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _loadError != null
@@ -787,7 +886,9 @@ class _HomeScreenState extends State<HomeScreen> {
                       'Database error: $_loadError',
                       textAlign: TextAlign.center,
                     ),
+
                     const SizedBox(height: 12),
+
                     FilledButton(
                       onPressed: () {
                         setState(() {
@@ -805,6 +906,7 @@ class _HomeScreenState extends State<HomeScreen> {
               index: _tabIndex,
               children: [_menuPage(), _plannerPage(), _savedPage()],
             ),
+
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tabIndex,
         onDestinationSelected: (index) {
